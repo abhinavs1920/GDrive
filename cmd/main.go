@@ -16,4 +16,7 @@ func main() {
 		log.Fatalf("Failed to authenticate Google Drive: %v", err)
 	}
 
+	// Initialize Drive Service
+	driveService := drive.NewDriveService(client)
+
 }
