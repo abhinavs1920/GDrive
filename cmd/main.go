@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"GDrive/internal/drive"
+	"GDrive/internal/fs"
 	"fmt"
 	"log"
 
@@ -19,4 +20,6 @@ func main() {
 	// Initialize Drive Service
 	driveService := drive.NewDriveService(client)
 
+	// Mount Google Drive
+	fs.Mount("/mnt/gdrive")
 }

@@ -3,6 +3,7 @@ module GDrive
 go 1.24.0
 
 require (
+	github.com/winfsp/cgofuse v1.6.0
 	bazil.org/fuse v0.0.0-20230120002735-62a210ff1fd5 // indirect
 	cloud.google.com/go/auth v0.15.0 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.7 // indirect
