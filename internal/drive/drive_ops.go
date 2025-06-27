@@ -1,11 +1,13 @@
 package drive
 
 import (
-	"fmt"
-	"io"
+    "fmt"
+    "io"
+    "net/http"
 
-	googleDrive "google.golang.org/api/drive/v3"
+    googleDrive "google.golang.org/api/drive/v3"
 )
+
 
 // DriveService struct holds the Drive client
 type DriveService struct {
@@ -17,18 +19,61 @@ func NewDriveService(client *googleDrive.Service) *DriveService {
 	return &DriveService{client: client}
 }
 
-// UploadFile uploads a file to Google Drive
+// UploadFile uploads a file to Drive root
 func (d *DriveService) UploadFile(filename string, file io.Reader) (*googleDrive.File, error) {
-	fileMetadata := &googleDrive.File{Name: filename}
-	driveFile, err := d.client.Files.Create(fileMetadata).Media(file).Do()
-	if err != nil {
-		return nil, fmt.Errorf("unable to upload file: %v", err)
-	}
-	return driveFile, nil
+    return d.UploadFileToFolder(filename, "root", file)
 }
 
-// DownloadFile downloads a file from Google Drive
-func (d *DriveService) DownloadFile(fileID string) ([]byte, error) {
+// UploadFileToFolder uploads a file to the given parent folderID ("root" for MyDrive root)
+func (d *DriveService) UploadFileToFolder(filename, parentID string, file io.Reader) (*googleDrive.File, error) {
+    fileMetadata := &googleDrive.File{Name: filename, Parents: []string{parentID}}
+    driveFile, err := d.client.Files.Create(fileMetadata).Media(file).Do()
+    if err != nil {
+        return nil, fmt.Errorf("unable to upload file: %v", err)
+    }
+    return driveFile, nil
+}
+
+// DownloadFile downloads or exports a file from Google Drive depending on its type.
+// For native Google docs it chooses a sensible Office format.
+func (d *DriveService) DownloadFile(file *googleDrive.File) ([]byte, error) {
+    var resp *http.Response
+    var err error
+    switch file.MimeType {
+    case "application/vnd.google-apps.spreadsheet":
+        resp, err = d.client.Files.Export(file.Id, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet").Download()
+    case "application/vnd.google-apps.document":
+        resp, err = d.client.Files.Export(file.Id, "application/vnd.openxmlformats-officedocument.wordprocessingml.document").Download()
+    case "application/vnd.google-apps.presentation":
+        resp, err = d.client.Files.Export(file.Id, "application/vnd.openxmlformats-officedocument.presentationml.presentation").Download()
+    default:
+        resp, err = d.client.Files.Get(file.Id).Download()
+    }
+    if err != nil {
+        return nil, fmt.Errorf("unable to download file: %v", err)
+    }
+    defer resp.Body.Close()
+    data, err := io.ReadAll(resp.Body)
+    if err != nil {
+        return nil, fmt.Errorf("error reading file data: %v", err)
+    }
+    return data, nil
+}
+
+// DownloadFileLegacy kept for compatibility with older callers.
+func (d *DriveService) DownloadFileLegacy(fileID string) ([]byte, error) {
+    resp, err := d.client.Files.Get(fileID).Download()
+    if err != nil {
+        return nil, fmt.Errorf("unable to download file: %v", err)
+    }
+    defer resp.Body.Close()
+    return io.ReadAll(resp.Body)
+}
+
+
+// Deprecated: use DownloadFileByID or DownloadFileLegacy; kept for backward compat
+
+func (d *DriveService) DownloadFileByID(fileID string) ([]byte, error) {
 	resp, err := d.client.Files.Get(fileID).Download()
 	if err != nil {
 		return nil, fmt.Errorf("unable to download file: %v", err)

@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"path"
+	p "path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -45,10 +45,8 @@ func (fs *GDriveFS) Read(path string, buff []byte, offset int64, fh uint64) int 
         if !ok2 {
             return -fuse.ENOENT
         }
-        if file.Size == 0 {
-            return 0 // empty file
-        }
-        content, err := fs.Drive.DownloadFile(file.Id)
+
+        content, err := fs.Drive.DownloadFile(file)
         if err != nil {
             log.Printf("Download error for %s: %v", cleaned, err)
             return -fuse.EIO
@@ -65,6 +63,7 @@ func (fs *GDriveFS) Read(path string, buff []byte, offset int64, fh uint64) int 
     return n
 }
 
+// Write writes to a temp file mapped to the handle
 // Write writes to a temp file mapped to the handle
 func (fs *GDriveFS) Write(path string, buff []byte, offset int64, fh uint64) int {
     fs.mu.RLock()
@@ -207,6 +206,7 @@ func (fs *GDriveFS) Open(path string, flags int) (int, uint64) {
 }
 
 // Release is called when file handle is closed; we upload the file if it was newly created
+// Release is called when file handle is closed; upload the temp file to Drive
 func (fs *GDriveFS) Release(path string, fh uint64) int {
     fs.mu.Lock()
     f, ok := fs.handles[fh]
@@ -217,6 +217,16 @@ func (fs *GDriveFS) Release(path string, fh uint64) int {
     if !ok {
         return 0
     }
+    // get size before close for Explorer
+    statInfo, _ := f.Stat()
+    fileSize := uint64(0)
+    if statInfo != nil {
+        fileSize = uint64(statInfo.Size())
+    }
+    // temporarily expose in-memory size for Explorer
+    fs.mu.Lock()
+    fs.index[name] = &googleDrive.File{Name: p.Base(name), Size: int64(fileSize)}
+    fs.mu.Unlock()
     f.Close()
     // Upload
     tmpReader, err := os.Open(f.Name())
@@ -225,7 +235,19 @@ func (fs *GDriveFS) Release(path string, fh uint64) int {
         return 0
     }
     defer tmpReader.Close()
-    _, err = fs.Drive.UploadFile(name, tmpReader)
+    // Determine target parent folder ID based on path of the new file
+    baseName := p.Base(name)
+    parentID := "root"
+    parentPath := p.Dir(name)
+    if parentPath != "." && parentPath != "" {
+        fs.mu.RLock()
+        if pFile, ok := fs.index[parentPath]; ok {
+            parentID = pFile.Id
+        }
+        fs.mu.RUnlock()
+    }
+    
+    _, err = fs.Drive.UploadFileToFolder(baseName, parentID, tmpReader)
     if err != nil {
         log.Printf("upload failed: %v", err)
     } else {
@@ -236,6 +258,52 @@ func (fs *GDriveFS) Release(path string, fh uint64) int {
         }
     }
     os.Remove(f.Name())
+    return 0
+}
+
+// Truncate resizes a file (needed by Windows before writes)
+func (fs *GDriveFS) Truncate(path string, size int64, fh uint64) int {
+    fs.mu.RLock()
+    f, ok := fs.handles[fh]
+    fs.mu.RUnlock()
+    if ok {
+        if err := f.Truncate(size); err != nil {
+            return -fuse.EIO
+        }
+        return 0
+    }
+    // no handle; ignore
+    return 0
+}
+
+// Flush ensures data is written to disk for a handle
+// Rename moves/renames a file or directory locally (Drive change postponed)
+func (fs *GDriveFS) Rename(oldpath, newpath string) int {
+    oldclean := strings.TrimPrefix(oldpath, "/")
+    newclean := strings.TrimPrefix(newpath, "/")
+    fs.mu.Lock()
+    f, ok := fs.index[oldclean]
+    if ok {
+        fs.index[newclean] = f
+        delete(fs.index, oldclean)
+    }
+    fs.mu.Unlock()
+    // TODO: call Drive API Files.Update to rename/move in background
+    return 0
+}
+
+// No-op implementations required by Windows
+func (fs *GDriveFS) Chmod(path string, mode uint32) int           { return 0 }
+func (fs *GDriveFS) Chown(path string, uid, gid uint32) int       { return 0 }
+func (fs *GDriveFS) Utimens(path string, tmsp []fuse.Timespec) int { return 0 }
+
+func (fs *GDriveFS) Flush(path string, fh uint64) int {
+    fs.mu.RLock()
+    f, ok := fs.handles[fh]
+    fs.mu.RUnlock()
+    if ok {
+        f.Sync()
+    }
     return 0
 }
 
@@ -278,7 +346,7 @@ func (fs *GDriveFS) buildIndex() error {
         if parentPath == "" {
             pathCache[id] = idToFile[id].Name
         } else {
-            pathCache[id] = path.Join(parentPath, idToFile[id].Name)
+            pathCache[id] = p.Join(parentPath, idToFile[id].Name)
         }
         return pathCache[id]
     }
