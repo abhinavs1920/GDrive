@@ -26,6 +26,9 @@ type GDriveFS struct {
 	mu         sync.RWMutex
 	index      map[string]*googleDrive.File
 	fileCache  map[string][]byte
+	handles    map[uint64]*os.File
+	tempNames  map[uint64]string
+	handleCtr  uint64
 }
 
 // Read handles file reading (read-only)
@@ -61,9 +64,20 @@ func (fs *GDriveFS) Read(path string, buff []byte, offset int64, fh uint64) int 
     return n
 }
 
-// Write is not supported (read-only for now)
+// Write writes to a temp file mapped to the handle
 func (fs *GDriveFS) Write(path string, buff []byte, offset int64, fh uint64) int {
-    return -fuse.EROFS
+    fs.mu.RLock()
+    f, ok := fs.handles[fh]
+    fs.mu.RUnlock()
+    if !ok {
+        return -fuse.EBADF
+    }
+    n, err := f.WriteAt(buff, offset)
+    if err != nil {
+        log.Printf("write error: %v", err)
+        return -fuse.EIO
+    }
+    return n
 }
 
 // Getattr gets file or directory attributes
@@ -145,6 +159,22 @@ func (fs *GDriveFS) Statfs(path string, stat *fuse.Statfs_t) int {
     return 0
 }
 
+func (fs *GDriveFS) Create(path string, flags int, mode uint32) (int, uint64) {
+    cleaned := strings.TrimPrefix(path, "/")
+    tmpFile, err := os.CreateTemp("", "gdfs-*")
+    if err != nil {
+        log.Printf("temp file create error: %v", err)
+        return -fuse.EIO, 0
+    }
+    fs.mu.Lock()
+    fs.handleCtr++
+    fh := fs.handleCtr
+    fs.handles[fh] = tmpFile
+    fs.tempNames[fh] = cleaned
+    fs.mu.Unlock()
+    return 0, fh
+}
+
 func (fs *GDriveFS) Open(path string, flags int) (int, uint64) {
     if path == "/" {
         return 0, 0
@@ -157,6 +187,39 @@ func (fs *GDriveFS) Open(path string, flags int) (int, uint64) {
         return -fuse.ENOENT, 0
     }
     return 0, 0
+}
+
+// Release is called when file handle is closed; we upload the file if it was newly created
+func (fs *GDriveFS) Release(path string, fh uint64) int {
+    fs.mu.Lock()
+    f, ok := fs.handles[fh]
+    name := fs.tempNames[fh]
+    delete(fs.handles, fh)
+    delete(fs.tempNames, fh)
+    fs.mu.Unlock()
+    if !ok {
+        return 0
+    }
+    f.Close()
+    // Upload
+    tmpReader, err := os.Open(f.Name())
+    if err != nil {
+        log.Printf("open temp for upload err: %v", err)
+        return 0
+    }
+    defer tmpReader.Close()
+    _, err = fs.Drive.UploadFile(name, tmpReader)
+    if err != nil {
+        log.Printf("upload failed: %v", err)
+    } else {
+        log.Printf("uploaded %s to Drive", name)
+        // refresh index for subsequent reads
+        if err := fs.buildIndex(); err != nil {
+            log.Printf("index refresh err: %v", err)
+        }
+    }
+    os.Remove(f.Name())
+    return 0
 }
 
 // buildIndex fetches root folder listing and builds path index
@@ -254,7 +317,7 @@ func Mount(mountPoint string, drv *gdrive.DriveService) (*fuse.FileSystemHost, e
 	log.Printf("Mounting GDriveFS at %s", mountPoint)
 
 	// Initialize filesystem
-	fs := &GDriveFS{Drive: drv}
+	fs := &GDriveFS{Drive: drv, handles: make(map[uint64]*os.File), tempNames: make(map[uint64]string)}
     fs.refreshQuota()
     if err := fs.buildIndex(); err != nil {
         log.Printf("Failed to build index: %v", err)
