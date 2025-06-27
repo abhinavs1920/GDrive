@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -82,7 +83,7 @@ func (fs *GDriveFS) Write(path string, buff []byte, offset int64, fh uint64) int
 
 // Getattr gets file or directory attributes
 func (fs *GDriveFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
-    if path == "/" {
+    if path == "/" || path == "" {
         stat.Mode = fuse.S_IFDIR | 0755
         stat.Nlink = 2
         return 0
@@ -107,14 +108,30 @@ func (fs *GDriveFS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 
 // Readdir lists entries in a directory (currently root only)
 func (fs *GDriveFS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofst int64) bool, offset int64, fh uint64) int {
-    if path != "/" {
-        return -fuse.ENOENT
+    cleaned := strings.TrimPrefix(path, "/")
+    prefix := ""
+    if cleaned != "" {
+        // verify dir exists
+        fs.mu.RLock()
+        if _, ok := fs.index[cleaned]; !ok {
+            fs.mu.RUnlock()
+            return -fuse.ENOENT
+        }
+        fs.mu.RUnlock()
+        prefix = cleaned + "/"
     }
     fill(".", nil, 0)
     fill("..", nil, 0)
     fs.mu.RLock()
-    for name := range fs.index {
-        fill(name, nil, 0)
+    for p := range fs.index {
+        if !strings.HasPrefix(p, prefix) {
+            continue
+        }
+        rest := strings.TrimPrefix(p, prefix)
+        if rest == "" || strings.Contains(rest, "/") {
+            continue
+        }
+        fill(rest, nil, 0)
     }
     fs.mu.RUnlock()
     return 0
@@ -227,15 +244,50 @@ func (fs *GDriveFS) buildIndex() error {
     if fs.Drive == nil {
         return fmt.Errorf("Drive service not set")
     }
-    files, err := fs.Drive.ListFilesInFolder("root")
+    files, err := fs.Drive.ListAllFiles()
     if err != nil {
         return err
     }
     fs.mu.Lock()
+    // Build maps
     fs.index = make(map[string]*googleDrive.File)
     fs.fileCache = make(map[string][]byte)
+    idToFile := make(map[string]*googleDrive.File)
+    parentsMap := make(map[string][]string) // childID -> parents
     for _, f := range files {
-        fs.index[f.Name] = f
+        idToFile[f.Id] = f
+        if len(f.Parents) > 0 {
+            parentsMap[f.Id] = f.Parents
+        } else {
+            // orphan, treat as root child
+            parentsMap[f.Id] = []string{"root"}
+        }
+    }
+    // Build path for each
+    pathCache := map[string]string{"root": ""}
+    var resolvePath func(id string) string
+    resolvePath = func(id string) string {
+        if p, ok := pathCache[id]; ok {
+            return p
+        }
+        prnts := parentsMap[id]
+        if len(prnts) == 0 {
+            return "" // orphan
+        }
+        parentPath := resolvePath(prnts[0]) // use first parent for now
+        if parentPath == "" {
+            pathCache[id] = idToFile[id].Name
+        } else {
+            pathCache[id] = path.Join(parentPath, idToFile[id].Name)
+        }
+        return pathCache[id]
+    }
+    for id := range idToFile {
+        p := resolvePath(id)
+        if p == "" {
+            continue
+        }
+        fs.index[p] = idToFile[id]
     }
     fs.mu.Unlock()
     return nil

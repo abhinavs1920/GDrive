@@ -48,7 +48,29 @@ func (d *DriveService) ListFilesInFolder(folderID string) ([]*googleDrive.File, 
     var files []*googleDrive.File
     pageTok := ""
     for {
-        req := d.client.Files.List().Q(fmt.Sprintf("'%s' in parents and trashed=false", folderID)).Fields("nextPageToken, files(id,name,mimeType,size)").PageSize(1000)
+        req := d.client.Files.List().Q(fmt.Sprintf("'%s' in parents and trashed=false", folderID)).Fields("nextPageToken, files(id,name,mimeType,size,parents)").PageSize(1000)
+        if pageTok != "" {
+            req = req.PageToken(pageTok)
+        }
+        resp, err := req.Do()
+        if err != nil {
+            return nil, fmt.Errorf("failed to list files: %v", err)
+        }
+        files = append(files, resp.Files...)
+        if resp.NextPageToken == "" {
+            break
+        }
+        pageTok = resp.NextPageToken
+    }
+    return files, nil
+}
+
+// ListAllFiles retrieves all non-trashed files in the drive with parents information.
+func (d *DriveService) ListAllFiles() ([]*googleDrive.File, error) {
+    var files []*googleDrive.File
+    pageTok := ""
+    for {
+        req := d.client.Files.List().Q("trashed=false").Fields("nextPageToken, files(id,name,mimeType,size,parents)").PageSize(1000)
         if pageTok != "" {
             req = req.PageToken(pageTok)
         }
