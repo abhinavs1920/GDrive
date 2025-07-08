@@ -1,6 +1,6 @@
 # 🚀 GDriveDisk: Google Drive-Based RAM Disk  
 
-GDriveDisk is a virtual RAM disk that mounts **Google Drive as a high-speed memory drive**, allowing temporary storage that syncs with Google Drive in real-time.  
+GDriveDisk is a virtual ROM disk that mounts **Google Drive as a high-speed memory drive**, allowing temporary storage that syncs with Google Drive in real-time.  
 
 ## 📌 Features  
 ✅ **Mount Google Drive as a Virtual File System (FUSE)**  
